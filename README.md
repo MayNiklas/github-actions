@@ -1,2 +1,3 @@
 # github-actions
-A collection of GitHub actions I wrote for different projects
+
+A collection of GitHub CI/CD workflows I likely will reuse in the future.
