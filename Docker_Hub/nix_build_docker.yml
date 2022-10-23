@@ -1,0 +1,163 @@
+# File written by GitHub user MayNiklas, newer versions can be found in https://github.com/MayNiklas/github-actions
+#
+# GitHub action for building docker images through nix build
+# Images are getting tagged & pushed to Dockerhub
+#
+# File location: .github/workflows/docker_image.yml
+#
+# Create the following GitHub Action secrets:
+#
+# DOCKER_HUB_USERNAME
+# DOCKER_HUB_REPO
+# DOCKER_HUB_ACCESS_TOKEN
+
+name: build docker images
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+  workflow_dispatch:
+jobs:
+  build-docker:
+    strategy:
+      matrix:
+        arch: [x86_64, i686, aarch64]
+
+    runs-on: ubuntu-latest
+    steps:
+      # checkout source code from github
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          # Nix Flakes doesn't work on shallow clones
+          fetch-depth: 0
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          # list of Docker images to use as base name for tags
+          images: |
+            ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}
+          # generate Docker tags based on the following events/attributes
+          tags: |
+            # set latest tag for default branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            # set version tag for git tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      # install nix package manager
+      # https://github.com/cachix/install-nix-action
+      - uses: cachix/install-nix-action@v18
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          # Configure Nix to enable flakes
+          extra_nix_config: |
+            extra-platforms = aarch64-linux i686-linux
+
+      # check if nix flakes is working
+      - run: nix flake check
+
+      # enable qemu for cross-compilation
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      # check if qemu is working
+      - name: Test binfmt availability
+        run: |
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+
+      # build package in this stage
+      # -> makes this workflow fail faster
+      - name: nix build .#shelly-exporter
+        run: |
+          nix build .#packages.${{ matrix.arch }}-linux.${{ secrets.DOCKER_HUB_REPO }}
+
+      - name: build docker image
+        run: |
+          nix build .#packages.${{ matrix.arch }}-linux.docker-image
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: load docker image
+        run: |
+          docker load < result
+
+      - name: show docker images
+        run: |
+          docker images
+
+      - name: execute docker image
+        run: |
+          docker run --rm ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:latest shelly-exporter -h
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: push docker image
+        run: |
+          docker tag ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:latest ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:${{ matrix.arch }}-latest
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:${{ matrix.arch }}-latest
+
+  manifest-create:
+    needs: [build-docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: create manifest
+        run: |
+          docker manifest create \
+          "${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:latest" \
+          --amend ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:x86_64-latest \
+          --amend ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:i686-latest \
+          --amend ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:aarch64-latest
+
+      - name: push manifest
+        run: |
+          docker manifest push "${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:latest"
+
+  tag-images:
+    needs: [build-docker]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set output
+        id: vars
+        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+
+      - name: create manifest
+        run: |
+          docker manifest create \
+          ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:${{ steps.vars.outputs.tag }} \
+          --amend ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:x86_64-latest \
+          --amend ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:i686-latest \
+          --amend ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:aarch64-latest
+
+      - name: push manifest
+        run: |
+          docker manifest push ${{ secrets.DOCKER_HUB_USERNAME }}/${{ secrets.DOCKER_HUB_REPO }}:${{ steps.vars.outputs.tag }}
