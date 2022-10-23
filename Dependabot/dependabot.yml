@@ -1,0 +1,19 @@
+# file location: .github/dependabot.yml
+
+version: 2
+updates:
+  # updates github actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    reviewers:
+      - "MayNiklas"
+    schedule:
+      interval: "weekly"
+
+  # updates go modules
+  - package-ecosystem: "gomod"
+    directory: "/"
+    reviewers:
+      - "MayNiklas"
+    schedule:
+      interval: "weekly"
